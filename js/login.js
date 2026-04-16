@@ -50,6 +50,21 @@ const passwordInput2 = document.getElementById('password-input-2');
 const passwordCancelBtn = document.getElementById('password-cancel-btn');
 const passwordSaveBtn = document.getElementById('password-save-btn');
 
+function getEdition() {
+    return window.getCliProxyEdition ? window.getCliProxyEdition() : 'normal';
+}
+
+function getEditionLabel() {
+    return getEdition() === 'plus' ? 'CLIProxyAPIPlus' : 'CLIProxyAPI';
+}
+
+function getLocalInvokeArgs(extra = {}) {
+    return {
+        ...extra,
+        edition: getEdition()
+    };
+}
+
 // Initialize the display state
 initializeFromLocalStorage();
 
@@ -101,9 +116,9 @@ updateCancelBtn.addEventListener('click', async () => {
     localStorage.setItem('type', "local");
     if (window.__TAURI__?.core?.invoke) {
         try {
-            const startRes = await window.__TAURI__.core.invoke('start_cliproxyapi');
+            const startRes = await window.__TAURI__.core.invoke('start_cliproxyapi', getLocalInvokeArgs());
             if (!startRes || !startRes.success) {
-                showError('CLIProxyAPI process start failed');
+                showError(`${getEditionLabel()} process start failed`);
                 return;
             }
             // Save the generated password for local mode HTTP requests
@@ -118,7 +133,7 @@ updateCancelBtn.addEventListener('click', async () => {
                 });
             }
         } catch (e) {
-            showError('CLIProxyAPI process start error');
+            showError(`${getEditionLabel()} process start error`);
             return;
         }
         await openSettingsWindowPreferNew();
@@ -134,10 +149,10 @@ updateConfirmBtn.addEventListener('click', async () => {
 
         if (window.__TAURI__?.core?.invoke) {
             const proxyUrl = proxyInput.value.trim();
-            const result = await window.__TAURI__.core.invoke('download_cliproxyapi', { proxyUrl });
+            const result = await window.__TAURI__.core.invoke('download_cliproxyapi', getLocalInvokeArgs({ proxyUrl }));
 
             if (result.success) {
-                console.log('CLIProxyAPI updated successfully:', result.path);
+                console.log(`${getEditionLabel()} updated successfully:`, result.path);
                 console.log('Version:', result.version);
 
                 // Save local connection to localStorage
@@ -148,16 +163,16 @@ updateConfirmBtn.addEventListener('click', async () => {
                 localStorage.removeItem('password');
 
                 // Check if password needs to be set
-                const secretKeyResult = await window.__TAURI__.core.invoke('check_secret_key');
+                const secretKeyResult = await window.__TAURI__.core.invoke('check_secret_key', getLocalInvokeArgs());
                 if (secretKeyResult.needsPassword) {
                     console.log('Password needs to be set:', secretKeyResult.reason);
                     passwordDialog.classList.add('show');
                 } else {
                     // Password is set: start process then go to settings
                     try {
-                        const startRes = await window.__TAURI__.core.invoke('start_cliproxyapi');
+                        const startRes = await window.__TAURI__.core.invoke('start_cliproxyapi', getLocalInvokeArgs());
                         if (!startRes || !startRes.success) {
-                            showError('CLIProxyAPI process start failed');
+                            showError(`${getEditionLabel()} process start failed`);
                             return;
                         }
                         // Save the generated password for local mode HTTP requests
@@ -172,18 +187,18 @@ updateConfirmBtn.addEventListener('click', async () => {
                             });
                         }
                     } catch (e) {
-                        showError('CLIProxyAPI process start error');
+                        showError(`${getEditionLabel()} process start error`);
                         return;
                     }
                     setTimeout(async () => { await openSettingsWindowPreferNew(); }, 800);
                 }
             } else {
-                showError('Failed to update CLIProxyAPI: ' + result.error);
+                showError(`Failed to update ${getEditionLabel()}: ${result.error}`);
             }
         }
     } catch (error) {
-        console.error('Error updating CLIProxyAPI:', error);
-        showError('Error updating CLIProxyAPI: ' + error.message);
+        console.error(`Error updating ${getEditionLabel()}:`, error);
+        showError(`Error updating ${getEditionLabel()}: ${error.message}`);
     } finally {
         continueBtn.disabled = false;
         continueBtn.textContent = 'Connect';
@@ -232,7 +247,10 @@ passwordSaveBtn.addEventListener('click', async () => {
 
         if (window.__TAURI__?.core?.invoke) {
             const result = await window.__TAURI__.core.invoke('update_secret_key', {
-                args: { secret_key: password1 },
+                args: {
+                    secret_key: password1,
+                    edition: getEdition()
+                }
             });
 
             if (result.success) {
@@ -247,9 +265,9 @@ passwordSaveBtn.addEventListener('click', async () => {
 
                 // Start process then go to settings
                 try {
-                    const startRes = await window.__TAURI__.core.invoke('start_cliproxyapi');
+                    const startRes = await window.__TAURI__.core.invoke('start_cliproxyapi', getLocalInvokeArgs());
                     if (!startRes || !startRes.success) {
-                        showError('CLIProxyAPI process start failed');
+                        showError(`${getEditionLabel()} process start failed`);
                         return;
                     }
                     // Save the generated password for local mode HTTP requests
@@ -258,7 +276,7 @@ passwordSaveBtn.addEventListener('click', async () => {
                         console.log('Saved local management key:', startRes.password);
                     }
                 } catch (e) {
-                    showError('CLIProxyAPI process start error');
+                    showError(`${getEditionLabel()} process start error`);
                     return;
                 }
                 setTimeout(async () => { await openSettingsWindowPreferNew(); }, 600);
@@ -291,14 +309,14 @@ if (window.__TAURI__?.event?.listen) {
     window.__TAURI__.event.listen('download-status', (event) => { handleDownloadStatus(event?.payload || {}); });
     window.__TAURI__.event.listen('process-start-error', (event) => {
         const errorData = event?.payload || {};
-        console.error('CLIProxyAPI process start failed:', errorData);
+        console.error(`${getEditionLabel()} process start failed:`, errorData);
         showError(`Connection error: ${errorData.error}`);
         if (errorData.reason) showError(`Reason: ${errorData.reason}`);
     });
     window.__TAURI__.event.listen('process-exit-error', (event) => {
         const errorData = event?.payload || {};
-        console.error('CLIProxyAPI process exited abnormally:', errorData);
-        showError(`CLIProxyAPI process exited abnormally, exit code: ${errorData.code}`);
+        console.error(`${getEditionLabel()} process exited abnormally:`, errorData);
+        showError(`${getEditionLabel()} process exited abnormally, exit code: ${errorData.code}`);
     });
 }
 
@@ -324,6 +342,10 @@ function initializeFromLocalStorage() {
     } else {
         // Default to local
         updateInputForm('local');
+
+        if (!window.getCliProxyEdition || !window.getCliProxyEdition()) {
+            window.setCliProxyEdition && window.setCliProxyEdition('normal');
+        }
 
         // Fill in proxy field if exists
         if (proxyUrl) {
@@ -364,13 +386,13 @@ async function handleConnectClick() {
 
             // Check version and download if needed
             if (window.__TAURI__?.core?.invoke) {
-                const result = await window.__TAURI__.core.invoke('check_version_and_download', { proxyUrl });
+                const result = await window.__TAURI__.core.invoke('check_version_and_download', getLocalInvokeArgs({ proxyUrl }));
 
                 if (result.success) {
                     if (result.needsUpdate) {
                         // Update needed, show update dialog
                         updateDialogMessage.textContent =
-                            `Current version: ${result.version}\nLatest version: ${result.latestVersion}\n\nDo you want to update to the latest version?`;
+                            `${getEditionLabel()} current version: ${result.version}\nLatest version: ${result.latestVersion}\n\nDo you want to update to the latest version?`;
                         updateDialog.classList.add('show');
 
                         // Save current path information
@@ -381,7 +403,7 @@ async function handleConnectClick() {
                         localStorage.removeItem('password');
                     } else {
                         // Version is latest, check password
-                        console.log('CLIProxyAPI version is latest:', result.version);
+                        console.log(`${getEditionLabel()} version is latest:`, result.version);
 
                         // Save local connection to localStorage
                         localStorage.setItem('type', "local");
@@ -391,16 +413,16 @@ async function handleConnectClick() {
                         localStorage.removeItem('password');
 
                         // Check if password needs to be set
-                        const secretKeyResult = await window.__TAURI__.core.invoke('check_secret_key');
+                        const secretKeyResult = await window.__TAURI__.core.invoke('check_secret_key', getLocalInvokeArgs());
                         if (secretKeyResult.needsPassword) {
                             console.log('Password needs to be set:', secretKeyResult.reason);
                             passwordDialog.classList.add('show');
                         } else {
                             // Password is set: start process then open settings page
                             try {
-                                const startRes = await window.__TAURI__.core.invoke('start_cliproxyapi');
+                                const startRes = await window.__TAURI__.core.invoke('start_cliproxyapi', getLocalInvokeArgs());
                                 if (!startRes || !startRes.success) {
-                                    showError('CLIProxyAPI process start failed');
+                                    showError(`${getEditionLabel()} process start failed`);
                                     return;
                                 }
                                 // Save the generated password for local mode HTTP requests
@@ -409,7 +431,7 @@ async function handleConnectClick() {
                                     console.log('Saved local management key:', startRes.password);
                                 }
                             } catch (e) {
-                                showError('CLIProxyAPI process start error');
+                                showError(`${getEditionLabel()} process start error`);
                                 return;
                             }
                             await openSettingsWindowPreferNew();

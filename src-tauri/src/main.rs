@@ -44,6 +44,8 @@ static KEEP_ALIVE_HANDLE: Lazy<Arc<Mutex<Option<(Arc<AtomicBool>, thread::JoinHa
 // Store the password used to start CLIProxyAPI for keep-alive authentication
 static CLI_PROXY_PASSWORD: Lazy<Arc<Mutex<Option<String>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
+static RUNNING_EDITION: Lazy<Arc<Mutex<Option<String>>>> =
+    Lazy::new(|| Arc::new(Mutex::new(None)));
 
 #[derive(Error, Debug)]
 enum AppError {
@@ -63,8 +65,56 @@ fn home_dir() -> Result<PathBuf, AppError> {
     home::home_dir().ok_or_else(|| AppError::Other("Failed to resolve home directory".into()))
 }
 
-fn app_dir() -> Result<PathBuf, AppError> {
-    Ok(home_dir()?.join("cliproxyapi"))
+#[derive(Clone, Copy)]
+enum Edition {
+    Normal,
+    Plus,
+}
+
+impl Edition {
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some(v) if v.eq_ignore_ascii_case("plus") => Self::Plus,
+            _ => Self::Normal,
+        }
+    }
+
+    fn repo_api(self) -> &'static str {
+        match self {
+            Self::Normal => "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest",
+            Self::Plus => "https://api.github.com/repos/router-for-me/CLIProxyAPIPlus/releases/latest",
+        }
+    }
+
+    fn asset_prefix(self) -> &'static str {
+        match self {
+            Self::Normal => "CLIProxyAPI",
+            Self::Plus => "CLIProxyAPIPlus",
+        }
+    }
+
+    fn executable_name(self) -> &'static str {
+        match self {
+            Self::Normal => "cli-proxy-api",
+            Self::Plus => "cli-proxy-api-plus",
+        }
+    }
+
+    fn app_dir_name(self) -> &'static str {
+        match self {
+            Self::Normal => "cliproxyapi",
+            Self::Plus => "cliproxyapi-plus",
+        }
+    }
+
+}
+
+fn edition_from_arg(edition: Option<String>) -> Edition {
+    Edition::parse(edition.as_deref())
+}
+
+fn app_dir_for(edition: Edition) -> Result<PathBuf, AppError> {
+    Ok(home_dir()?.join(edition.app_dir_name()))
 }
 
 fn resolve_path(input: &str, base: Option<&Path>) -> PathBuf {
@@ -122,8 +172,16 @@ struct OpResult {
 }
 
 fn compare_versions(a: &str, b: &str) -> i32 {
-    let pa: Vec<i32> = a.split('.').filter_map(|s| s.parse().ok()).collect();
-    let pb: Vec<i32> = b.split('.').filter_map(|s| s.parse().ok()).collect();
+    let parse = |value: &str| -> Vec<i32> {
+        value
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|segment| !segment.is_empty())
+            .filter_map(|segment| segment.parse().ok())
+            .collect()
+    };
+
+    let pa = parse(a);
+    let pb = parse(b);
     let len = pa.len().max(pb.len());
     for i in 0..len {
         let va = *pa.get(i).unwrap_or(&0);
@@ -138,8 +196,8 @@ fn compare_versions(a: &str, b: &str) -> i32 {
     0
 }
 
-fn current_local_info() -> Result<Option<(String, PathBuf)>, AppError> {
-    let dir = app_dir()?;
+fn current_local_info(edition: Edition) -> Result<Option<(String, PathBuf)>, AppError> {
+    let dir = app_dir_for(edition)?;
     let version_file = dir.join("version.txt");
     if !version_file.exists() {
         return Ok(None);
@@ -152,8 +210,8 @@ fn current_local_info() -> Result<Option<(String, PathBuf)>, AppError> {
     Ok(Some((ver, path)))
 }
 
-fn ensure_config(version_path: &Path) -> Result<(), AppError> {
-    let dir = app_dir()?;
+fn ensure_config(version_path: &Path, edition: Edition) -> Result<(), AppError> {
+    let dir = app_dir_for(edition)?;
     let config = dir.join("config.yaml");
     if config.exists() {
         return Ok(());
@@ -357,12 +415,12 @@ fn parse_proxy_url(proxy_url: &str) -> Result<ProxyConfig, String> {
     }
 }
 
-async fn fetch_latest_release(proxy_url: String) -> Result<VersionInfo, AppError> {
+async fn fetch_latest_release(proxy_url: String, edition: Edition) -> Result<VersionInfo, AppError> {
     let client = parse_proxy(&proxy_url, reqwest::Client::builder())
         .user_agent("EasyCLI")
         .build()?;
     let resp = client
-        .get("https://api.github.com/repos/luispater/CLIProxyAPI/releases/latest")
+        .get(edition.repo_api())
         .header("Accept", "application/vnd.github.v3+json")
         .send()
         .await?
@@ -374,23 +432,25 @@ async fn fetch_latest_release(proxy_url: String) -> Result<VersionInfo, AppError
 async fn check_version_and_download(
     window: tauri::Window,
     proxy_url: Option<String>,
+    edition: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let proxy = proxy_url.unwrap_or_default();
-    let dir = app_dir().map_err(|e| e.to_string())?;
+    let edition = edition_from_arg(edition);
+    let dir = app_dir_for(edition).map_err(|e| e.to_string())?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
-    let local = current_local_info().map_err(|e| e.to_string())?;
+    let local = current_local_info(edition).map_err(|e| e.to_string())?;
     window
         .emit("download-status", json!({"status": "checking"}))
         .ok();
-    let release = fetch_latest_release(proxy.clone())
+    let release = fetch_latest_release(proxy.clone(), edition)
         .await
         .map_err(|e| e.to_string())?;
     let latest = release.tag_name.trim_start_matches('v').to_string();
 
     if let Some((ver, path)) = local {
         let cmp = compare_versions(&ver, &latest);
-        ensure_config(&path).map_err(|e| e.to_string())?;
+        ensure_config(&path, edition).map_err(|e| e.to_string())?;
         if cmp >= 0 {
             window
                 .emit(
@@ -446,11 +506,13 @@ struct DownloadArgs {
 async fn download_cliproxyapi(
     window: tauri::Window,
     proxy_url: Option<String>,
+    edition: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let proxy = proxy_url.unwrap_or_default();
-    let dir = app_dir().map_err(|e| e.to_string())?;
+    let edition = edition_from_arg(edition);
+    let dir = app_dir_for(edition).map_err(|e| e.to_string())?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let release = fetch_latest_release(proxy.clone())
+    let release = fetch_latest_release(proxy.clone(), edition)
         .await
         .map_err(|e| e.to_string())?;
     let latest = release.tag_name.trim_start_matches('v').to_string();
@@ -458,12 +520,12 @@ async fn download_cliproxyapi(
     let platform = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
     let filename = match (platform, arch) {
-        ("macos", "aarch64") => format!("CLIProxyAPI_{}_darwin_arm64.tar.gz", latest),
-        ("macos", "x86_64") => format!("CLIProxyAPI_{}_darwin_amd64.tar.gz", latest),
-        ("linux", "x86_64") => format!("CLIProxyAPI_{}_linux_amd64.tar.gz", latest),
-        ("linux", "aarch64") => format!("CLIProxyAPI_{}_linux_arm64.tar.gz", latest),
-        ("windows", "x86_64") => format!("CLIProxyAPI_{}_windows_amd64.zip", latest),
-        ("windows", "aarch64") => format!("CLIProxyAPI_{}_windows_arm64.zip", latest),
+        ("macos", "aarch64") => format!("{}_{}_darwin_arm64.tar.gz", edition.asset_prefix(), latest),
+        ("macos", "x86_64") => format!("{}_{}_darwin_amd64.tar.gz", edition.asset_prefix(), latest),
+        ("linux", "x86_64") => format!("{}_{}_linux_amd64.tar.gz", edition.asset_prefix(), latest),
+        ("linux", "aarch64") => format!("{}_{}_linux_arm64.tar.gz", edition.asset_prefix(), latest),
+        ("windows", "x86_64") => format!("{}_{}_windows_amd64.zip", edition.asset_prefix(), latest),
+        ("windows", "aarch64") => format!("{}_{}_windows_arm64.zip", edition.asset_prefix(), latest),
         _ => return Err(format!("Unsupported platform: {} {}", platform, arch)),
     };
     let asset = release
@@ -545,7 +607,7 @@ async fn download_cliproxyapi(
     let _ = fs::remove_file(&download_path);
 
     // Ensure config exists
-    ensure_config(&extract_path).map_err(|e| e.to_string())?;
+    ensure_config(&extract_path, edition).map_err(|e| e.to_string())?;
 
     window
         .emit(
@@ -594,8 +656,9 @@ fn extract_targz(tar_gz_path: &Path, dest: &Path) -> Result<(), AppError> {
 }
 
 #[tauri::command]
-fn check_secret_key() -> Result<serde_json::Value, String> {
-    let dir = app_dir().map_err(|e| e.to_string())?;
+fn check_secret_key(edition: Option<String>) -> Result<serde_json::Value, String> {
+    let edition = edition_from_arg(edition);
+    let dir = app_dir_for(edition).map_err(|e| e.to_string())?;
     let config_path = dir.join("config.yaml");
     if !config_path.exists() {
         return Ok(json!({"needsPassword": true, "reason": "Config file missing"}));
@@ -619,12 +682,14 @@ fn check_secret_key() -> Result<serde_json::Value, String> {
 #[derive(Deserialize)]
 struct UpdateSecretKeyArgs {
     secret_key: String,
+    edition: Option<String>,
 }
 
 #[tauri::command]
 fn update_secret_key(args: UpdateSecretKeyArgs) -> Result<serde_json::Value, String> {
     let secret_key = args.secret_key;
-    let dir = app_dir().map_err(|e| e.to_string())?;
+    let edition = edition_from_arg(args.edition);
+    let dir = app_dir_for(edition).map_err(|e| e.to_string())?;
     let p = dir.join("config.yaml");
 
     // Create directory if it doesn't exist
@@ -669,8 +734,9 @@ fn update_secret_key(args: UpdateSecretKeyArgs) -> Result<serde_json::Value, Str
 }
 
 #[tauri::command]
-fn read_config_yaml() -> Result<serde_json::Value, String> {
-    let dir = app_dir().map_err(|e| e.to_string())?;
+fn read_config_yaml(edition: Option<String>) -> Result<serde_json::Value, String> {
+    let edition = edition_from_arg(edition);
+    let dir = app_dir_for(edition).map_err(|e| e.to_string())?;
     let p = dir.join("config.yaml");
     if !p.exists() {
         return Ok(json!({}));
@@ -681,20 +747,15 @@ fn read_config_yaml() -> Result<serde_json::Value, String> {
     Ok(json_v)
 }
 
-#[derive(Deserialize)]
-struct UpdateConfigArgs {
-    endpoint: String,
-    value: serde_json::Value,
-    isDelete: Option<bool>,
-}
-
 #[tauri::command]
 fn update_config_yaml(
     endpoint: String,
     value: serde_json::Value,
     is_delete: Option<bool>,
+    edition: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let dir = app_dir().map_err(|e| e.to_string())?;
+    let edition = edition_from_arg(edition);
+    let dir = app_dir_for(edition).map_err(|e| e.to_string())?;
     let p = dir.join("config.yaml");
     if !p.exists() {
         return Err("Configuration file does not exist".into());
@@ -732,8 +793,9 @@ fn update_config_yaml(
 }
 
 #[tauri::command]
-fn read_local_auth_files() -> Result<serde_json::Value, String> {
-    let dir = app_dir().map_err(|e| e.to_string())?;
+fn read_local_auth_files(edition: Option<String>) -> Result<serde_json::Value, String> {
+    let edition = edition_from_arg(edition);
+    let dir = app_dir_for(edition).map_err(|e| e.to_string())?;
     let p = dir.join("config.yaml");
     if !p.exists() {
         return Ok(json!([]));
@@ -793,8 +855,9 @@ struct UploadFile {
 }
 
 #[tauri::command]
-fn upload_local_auth_files(files: Vec<UploadFile>) -> Result<serde_json::Value, String> {
-    let dir = app_dir().map_err(|e| e.to_string())?;
+fn upload_local_auth_files(files: Vec<UploadFile>, edition: Option<String>) -> Result<serde_json::Value, String> {
+    let edition = edition_from_arg(edition);
+    let dir = app_dir_for(edition).map_err(|e| e.to_string())?;
     let p = dir.join("config.yaml");
     if !p.exists() {
         return Err("Configuration file does not exist".into());
@@ -831,8 +894,9 @@ fn upload_local_auth_files(files: Vec<UploadFile>) -> Result<serde_json::Value, 
 }
 
 #[tauri::command]
-fn delete_local_auth_files(filenames: Vec<String>) -> Result<serde_json::Value, String> {
-    let dir = app_dir().map_err(|e| e.to_string())?;
+fn delete_local_auth_files(filenames: Vec<String>, edition: Option<String>) -> Result<serde_json::Value, String> {
+    let edition = edition_from_arg(edition);
+    let dir = app_dir_for(edition).map_err(|e| e.to_string())?;
     let p = dir.join("config.yaml");
     if !p.exists() {
         return Err("Configuration file does not exist".into());
@@ -861,8 +925,9 @@ fn delete_local_auth_files(filenames: Vec<String>) -> Result<serde_json::Value, 
 }
 
 #[tauri::command]
-fn download_local_auth_files(filenames: Vec<String>) -> Result<serde_json::Value, String> {
-    let dir = app_dir().map_err(|e| e.to_string())?;
+fn download_local_auth_files(filenames: Vec<String>, edition: Option<String>) -> Result<serde_json::Value, String> {
+    let edition = edition_from_arg(edition);
+    let dir = app_dir_for(edition).map_err(|e| e.to_string())?;
     let p = dir.join("config.yaml");
     if !p.exists() {
         return Err("Configuration file does not exist".into());
@@ -890,8 +955,8 @@ fn download_local_auth_files(filenames: Vec<String>) -> Result<serde_json::Value
     Ok(json!({"success": !files.is_empty(), "files": files, "errorCount": error_count}))
 }
 
-fn find_executable(version_path: &Path) -> Option<PathBuf> {
-    let mut exe = PathBuf::from("cli-proxy-api");
+fn find_executable(version_path: &Path, edition: Edition) -> Option<PathBuf> {
+    let mut exe = PathBuf::from(edition.executable_name());
     if cfg!(target_os = "windows") {
         exe.set_extension("exe");
     }
@@ -1085,7 +1150,9 @@ fn kill_process_on_port(port: u16) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn start_cliproxyapi(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+fn start_cliproxyapi(app: tauri::AppHandle, edition: Option<String>) -> Result<serde_json::Value, String> {
+    let edition = edition_from_arg(edition);
+
     // Check if already running by testing PID
     if let Some(pid) = *PROCESS_PID.lock() {
         #[cfg(target_os = "windows")]
@@ -1109,10 +1176,10 @@ fn start_cliproxyapi(app: tauri::AppHandle) -> Result<serde_json::Value, String>
         }
     }
 
-    let info = current_local_info().map_err(|e| e.to_string())?;
+    let info = current_local_info(edition).map_err(|e| e.to_string())?;
     let (_ver, path) = info.ok_or("Version file does not exist")?;
-    let exec = find_executable(&path).ok_or("Executable file does not exist")?;
-    let config = app_dir().map_err(|e| e.to_string())?.join("config.yaml");
+    let exec = find_executable(&path, edition).ok_or("Executable file does not exist")?;
+    let config = app_dir_for(edition).map_err(|e| e.to_string())?.join("config.yaml");
     if !config.exists() {
         return Err("Configuration file does not exist".into());
     }
@@ -1133,6 +1200,10 @@ fn start_cliproxyapi(app: tauri::AppHandle) -> Result<serde_json::Value, String>
 
     // Store the password for keep-alive authentication
     *CLI_PROXY_PASSWORD.lock() = Some(password.clone());
+    *RUNNING_EDITION.lock() = Some(match edition {
+        Edition::Normal => "normal".to_string(),
+        Edition::Plus => "plus".to_string(),
+    });
 
     // Ensure remote-management section exists
     if !conf
@@ -1210,7 +1281,11 @@ fn start_cliproxyapi(app: tauri::AppHandle) -> Result<serde_json::Value, String>
     let _ = create_tray(&app);
 
     // Start keep-alive mechanism for Local mode
-    let config = read_config_yaml().unwrap_or(json!({}));
+    let config = read_config_yaml(Some(match edition {
+        Edition::Normal => "normal".to_string(),
+        Edition::Plus => "plus".to_string(),
+    }))
+    .unwrap_or(json!({}));
     let port = config.get("port").and_then(|v| v.as_u64()).unwrap_or(8317) as u16;
     let _ = start_keep_alive(port);
 
@@ -1218,7 +1293,9 @@ fn start_cliproxyapi(app: tauri::AppHandle) -> Result<serde_json::Value, String>
 }
 
 #[tauri::command]
-fn restart_cliproxyapi(app: tauri::AppHandle) -> Result<(), String> {
+fn restart_cliproxyapi(app: tauri::AppHandle, edition: Option<String>) -> Result<(), String> {
+    let edition = edition_from_arg(edition.or_else(|| RUNNING_EDITION.lock().clone()));
+
     // Kill existing detached process if PID is stored
     if let Some(pid) = *PROCESS_PID.lock() {
         println!("[CLIProxyAPI][RESTART] Killing old process PID: {}", pid);
@@ -1239,10 +1316,10 @@ fn restart_cliproxyapi(app: tauri::AppHandle) -> Result<(), String> {
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
     // Start new using current version
-    let info = current_local_info().map_err(|e| e.to_string())?;
+    let info = current_local_info(edition).map_err(|e| e.to_string())?;
     let (ver, path) = info.ok_or("Version file does not exist")?;
-    let exec = find_executable(&path).ok_or("Executable file does not exist")?;
-    let config = app_dir().map_err(|e| e.to_string())?.join("config.yaml");
+    let exec = find_executable(&path, edition).ok_or("Executable file does not exist")?;
+    let config = app_dir_for(edition).map_err(|e| e.to_string())?.join("config.yaml");
     if !config.exists() {
         return Err("Configuration file does not exist".into());
     }
@@ -1263,6 +1340,10 @@ fn restart_cliproxyapi(app: tauri::AppHandle) -> Result<(), String> {
 
     // Store the password for keep-alive authentication
     *CLI_PROXY_PASSWORD.lock() = Some(password.clone());
+    *RUNNING_EDITION.lock() = Some(match edition {
+        Edition::Normal => "normal".to_string(),
+        Edition::Plus => "plus".to_string(),
+    });
 
     // Ensure remote-management section exists
     if !conf
@@ -1335,12 +1416,25 @@ fn restart_cliproxyapi(app: tauri::AppHandle) -> Result<(), String> {
     std::mem::drop(child);
 
     // Start keep-alive mechanism for Local mode
-    let config = read_config_yaml().unwrap_or(json!({}));
+    let config = read_config_yaml(Some(match edition {
+        Edition::Normal => "normal".to_string(),
+        Edition::Plus => "plus".to_string(),
+    }))
+    .unwrap_or(json!({}));
     let port = config.get("port").and_then(|v| v.as_u64()).unwrap_or(8317) as u16;
     let _ = start_keep_alive(port);
 
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.emit("cliproxyapi-restarted", json!({"version": ver}));
+        let _ = w.emit(
+            "cliproxyapi-restarted",
+            json!({
+                "version": ver,
+                "edition": match edition {
+                    Edition::Normal => "normal",
+                    Edition::Plus => "plus",
+                }
+            }),
+        );
     }
     Ok(())
 }
@@ -1351,6 +1445,7 @@ fn stop_process_internal() {
     stop_keep_alive_internal();
     // Clear stored password when app stops
     *CLI_PROXY_PASSWORD.lock() = None;
+    *RUNNING_EDITION.lock() = None;
     println!(
         "[CLIProxyAPI][INFO] EasyCLI app closing - CLIProxyAPI will continue running in background"
     );

@@ -5,6 +5,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const currentConfig = await getCurrentConfig();
         originalConfig = currentConfig;
         await initializeDebugSwitch();
+        initializeEditionSwitch();
         await initializePort();
         await initializeProxyUrl();
         await initializeRemoteManagement();

@@ -2,6 +2,27 @@
  * Configuration Manager Abstraction Layer
  * Unified operation interface for Local and Remote modes
  */
+const EDITION_STORAGE_KEY = 'cliproxyapi-edition';
+
+function getCliProxyEdition() {
+    const edition = localStorage.getItem(EDITION_STORAGE_KEY);
+    return edition === 'plus' ? 'plus' : 'normal';
+}
+
+function setCliProxyEdition(edition) {
+    localStorage.setItem(EDITION_STORAGE_KEY, edition === 'plus' ? 'plus' : 'normal');
+}
+
+window.getCliProxyEdition = getCliProxyEdition;
+window.setCliProxyEdition = setCliProxyEdition;
+
+function getLocalEditionInvokeArgs(args = {}) {
+    return {
+        ...args,
+        edition: getCliProxyEdition()
+    };
+}
+
 class ConfigManager {
     constructor() {
         this.type = localStorage.getItem('type') || 'local';
@@ -229,7 +250,7 @@ class ConfigManager {
     async getLocalConfig() {
         try {
             if (window.__TAURI__?.core?.invoke) {
-                const config = await window.__TAURI__.core.invoke('read_config_yaml');
+                const config = await window.__TAURI__.core.invoke('read_config_yaml', getLocalEditionInvokeArgs());
                 return config || {};
             }
             const configStr = localStorage.getItem('config');
@@ -250,11 +271,11 @@ class ConfigManager {
     async updateLocalSetting(endpoint, value, isDelete = false) {
         try {
             if (window.__TAURI__?.core?.invoke) {
-                const result = await window.__TAURI__.core.invoke('update_config_yaml', {
+                const result = await window.__TAURI__.core.invoke('update_config_yaml', getLocalEditionInvokeArgs({
                     endpoint,
                     value,
                     is_delete: isDelete
-                });
+                }));
                 return !!(result && result.success);
             }
             // Fallback to localStorage (testing only)
@@ -335,7 +356,7 @@ class ConfigManager {
     async getLocalAuthFiles() {
         try {
             if (window.__TAURI__?.core?.invoke) {
-                const files = await window.__TAURI__.core.invoke('read_local_auth_files');
+                const files = await window.__TAURI__.core.invoke('read_local_auth_files', getLocalEditionInvokeArgs());
                 return files || [];
             }
             return [];
@@ -359,7 +380,7 @@ class ConfigManager {
                     const content = await this.readFileAsText(file);
                     fileData.push({ name: file.name, content });
                 }
-                const result = await window.__TAURI__.core.invoke('upload_local_auth_files', { files: fileData });
+                const result = await window.__TAURI__.core.invoke('upload_local_auth_files', getLocalEditionInvokeArgs({ files: fileData }));
                 return result;
             }
             return { success: false, error: 'Tauri environment required' };
@@ -395,7 +416,7 @@ class ConfigManager {
         try {
             if (window.__TAURI__?.core?.invoke) {
                 const filenameArray = Array.isArray(filenames) ? filenames : [filenames];
-                const result = await window.__TAURI__.core.invoke('delete_local_auth_files', { filenames: filenameArray });
+                const result = await window.__TAURI__.core.invoke('delete_local_auth_files', getLocalEditionInvokeArgs({ filenames: filenameArray }));
                 return result;
             }
             return { success: false, error: 'Tauri environment required' };
@@ -581,7 +602,7 @@ class ConfigManager {
         try {
             if (window.__TAURI__?.core?.invoke) {
                 const filenameArray = Array.isArray(filenames) ? filenames : [filenames];
-                const result = await window.__TAURI__.core.invoke('download_local_auth_files', { filenames: filenameArray });
+                const result = await window.__TAURI__.core.invoke('download_local_auth_files', getLocalEditionInvokeArgs({ filenames: filenameArray }));
 
                 if (result && result.success && result.files) {
                     // Prefer Tauri native directory picker + save

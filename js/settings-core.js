@@ -12,6 +12,7 @@ const secretKeyInput = document.getElementById('secret-key-input');
 const switchProjectSwitch = document.getElementById('switch-project-switch');
 const switchPreviewModelSwitch = document.getElementById('switch-preview-model-switch');
 const autoStartSwitch = document.getElementById('auto-start-switch');
+const editionSwitch = document.getElementById('edition-switch');
 
 // Action buttons
 const applyBtn = document.getElementById('apply-btn');
@@ -94,7 +95,9 @@ function updateServerStatus() {
     const connectionType = localStorage.getItem('type') || 'local';
 
     if (connectionType === 'local') {
-        serverStatusText.innerHTML = '<span style="color: #10b981;">●</span> Local';
+        const edition = window.getCliProxyEdition ? window.getCliProxyEdition() : 'normal';
+        const editionLabel = edition === 'plus' ? 'Plus' : 'Normal';
+        serverStatusText.innerHTML = `<span style="color: #10b981;">●</span> Local (${editionLabel})`;
     } else {
         configManager.refreshConnection();
         const storedBaseUrl = localStorage.getItem('base-url');
@@ -109,7 +112,7 @@ function updateServerStatus() {
 }
 
 window.addEventListener('storage', (event) => {
-    if (!event || event.key === null || event.key === 'base-url' || event.key === 'type') {
+    if (!event || event.key === null || event.key === 'base-url' || event.key === 'type' || event.key === 'cliproxyapi-edition') {
         updateServerStatus();
     }
 });
@@ -136,6 +139,13 @@ async function initializeAdditionalSettings() {
         switchProjectSwitch.checked = false;
         switchPreviewModelSwitch.checked = false;
     }
+}
+
+function initializeEditionSwitch() {
+    if (!editionSwitch) {
+        return;
+    }
+    editionSwitch.checked = window.getCliProxyEdition && window.getCliProxyEdition() === 'plus';
 }
 
 // Initialize auto-start switch
@@ -218,6 +228,13 @@ async function applyAllSettings() {
             }
 
             const connectionType = localStorage.getItem('type') || 'local';
+            if (connectionType === 'local' && editionSwitch) {
+                const nextEdition = editionSwitch.checked ? 'plus' : 'normal';
+                const currentEdition = window.getCliProxyEdition ? window.getCliProxyEdition() : 'normal';
+                if (nextEdition !== currentEdition && window.setCliProxyEdition) {
+                    window.setCliProxyEdition(nextEdition);
+                }
+            }
             if (connectionType === 'local') {
                 const serverPort = serverConfig.port || 8080;
                 if (parseInt(portInput.value) !== serverPort) {
@@ -316,6 +333,7 @@ async function applyAllSettings() {
 
             if (currentTab === 'basic') {
                 await initializeDebugSwitch();
+                initializeEditionSwitch();
                 await initializePort();
                 await initializeProxyUrl();
                 await initializeRemoteManagement();
@@ -339,7 +357,9 @@ async function applyAllSettings() {
                 console.log('Port configuration has changed, need to restart CLIProxyAPI process');
                 showSuccessMessage('Port configuration saved, restarting CLIProxyAPI process...');
                 if (window.__TAURI__?.core?.invoke) {
-                    window.__TAURI__.core.invoke('restart_cliproxyapi');
+                    window.__TAURI__.core.invoke('restart_cliproxyapi', {
+                        edition: window.getCliProxyEdition ? window.getCliProxyEdition() : 'normal'
+                    });
                 }
             }
         } else {
@@ -368,6 +388,7 @@ async function resetAllSettings() {
 
             const connectionType = localStorage.getItem('type') || 'local';
             if (connectionType === 'local') {
+                initializeEditionSwitch();
                 portInput.value = serverConfig.port || 8080;
                 const serverRemoteManagement = serverConfig['remote-management'] || {};
                 allowRemoteSwitch.checked = serverRemoteManagement['allow-remote'] || false;
